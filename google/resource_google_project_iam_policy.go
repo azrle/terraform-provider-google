@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 
 	"github.com/hashicorp/terraform/helper/schema"
 	"google.golang.org/api/cloudresourcemanager/v1"
@@ -231,6 +232,46 @@ func resourceGoogleProjectIamPolicyDelete(d *schema.ResourceData, meta interface
 	return nil
 }
 
+// Check if a member (email string) is managed by Google
+func isManagedByGoogle(project, m string) bool {
+	split := strings.Split(m, "@")
+	if len(split) != 2 {
+		// it is not like an email address
+		// definitely not an account managed by google
+		return false
+	}
+	domain := split[1]
+	split = strings.Split(domain, ".")
+	if len(split) >= 3 &&
+		split[len(split)-2] == "gserviceaccount" && split[len(split)-1] == "com" &&
+		split[0] != project {
+		// accounts managed by google should have domains look like
+		// **.gserviceaccount.com
+		// and not starting with [PROJECT_ID]
+		return true
+	}
+	return false
+}
+
+// Subtract accounts managed by Google from the policy
+func subtractGoogleIam(project string, p *cloudresourcemanager.Policy) *cloudresourcemanager.Policy {
+	var bindings []*cloudresourcemanager.Binding
+	for _, binding := range p.Bindings {
+		var members []string
+		for _, member := range binding.Members {
+			if !isManagedByGoogle(project, member) {
+				members = append(members, member)
+			}
+		}
+		if len(members) > 0 {
+			binding.Members = members
+			bindings = append(bindings, binding)
+		}
+	}
+	p.Bindings = bindings
+	return p
+}
+
 // Subtract all bindings in policy b from policy a, and return the result
 func subtractIamPolicy(a, b *cloudresourcemanager.Policy) *cloudresourcemanager.Policy {
 	am := rolesToMembersMap(a.Bindings)
@@ -307,7 +348,9 @@ func getProjectIamPolicy(project string, config *Config) (*cloudresourcemanager.
 	if err != nil {
 		return nil, fmt.Errorf("Error retrieving IAM policy for project %q: %s", project, err)
 	}
-	return p, nil
+
+	// subtract accounts managed by Google
+	return subtractGoogleIam(project, p), nil
 }
 
 // Convert a map of roles->members to a list of Binding
